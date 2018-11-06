@@ -2,36 +2,44 @@ const request = require('request-promise-native')
 // https://docs.aws.amazon.com/general/latest/gr/sigv4_signing.html
 const aws4 = require('aws4')
 
-// constant
-const METADATA_URL = 'http://169.254.169.254/latest/'
+// constants
+const EC2_METADATA_BASE_URL = 'http://169.254.169.254/latest/'
+const ECS_METADATA_BASE_URL = 'http://169.254.170.2'
+
+// cache reference to avoid multiple network calls to fetch the role
+let role
+const getEc2Role = async () => {
+  if (role) {
+    return role
+  } else {
+    role = await request(`${EC2_METADATA_BASE_URL}meta-data/iam/security-credentials/`)
+    return role
+  }
+}
 
 // obtains, parses and formats the relevant data
-// from the EC2 instance metadata service
-const getInstanceData = async () => {
-  // get role
-  const role =
-    await request(`${METADATA_URL}meta-data/iam/security-credentials/`)
-
-  // get credentials using role
-  const credentials =
-    await request(`${METADATA_URL}meta-data/iam/security-credentials/${role}`)
+// from the ECS or EC2 instance metadata service
+const getCredentials = async () => {
+  // Elastic Container Service
+  if (process.env.AWS_CONTAINER_CREDENTIALS_RELATIVE_URI) {
+    return await request(`${ECS_METADATA_BASE_URL}${process.env.AWS_CONTAINER_CREDENTIALS_RELATIVE_URI}`)
       .then(JSON.parse)
 
-  // return instance data
-  return {
-    role,
-    credentials
+  // EC2
+  } else {
+    // get credentials using role
+    return await request(`${EC2_METADATA_BASE_URL}meta-data/iam/security-credentials/${await getEc2Role()}`)
+      .then(JSON.parse)
   }
 }
 
 // creates a signed request to the GetCallerIdentity method
 // from the STS service by inferring credentials data from
-// the EC2 instance metadata service and signing it with
+// the ECS or EC2 instance metadata service and signing it with
 // AWS signature version 4
-const getSignedEc2IamRequest = async () => {
+const getSignedIamRequest = async () => {
   // get instance data
-  const instanceData = await getInstanceData()
-  const { role, credentials } = instanceData
+  const credentials = await getCredentials()
 
   // construct request
   const url = 'https://sts.amazonaws.com/'
@@ -61,7 +69,6 @@ const getSignedEc2IamRequest = async () => {
 
   // construct request for vault
   return {
-    role,
     iam_http_request_method: 'POST',
     iam_request_url: Buffer
       .from(url).toString('base64'),
@@ -72,13 +79,14 @@ const getSignedEc2IamRequest = async () => {
   }
 }
 
-const awsEc2IamLogin = async (vault, options = {}) => {
+const awsIamLogin = async (vault, options = {}) => {
   // execute login operation
-  const request = await getSignedEc2IamRequest()
-  // the role to use with Vault might be different than the role used by AWS
-  request.role = options.vaultRole || process.env.VAULT_ROLE || request.role
+  const vaultRequest = await getSignedIamRequest()
 
-  const authResult = await vault.awsIamLogin(request)
+  // the role to use with Vault might be different than the role used by AWS
+  vaultRequest.role = options.vaultRole || process.env.VAULT_ROLE || await getEc2Role()
+
+  const authResult = await vault.awsIamLogin(vaultRequest)
 
   // login with the returned token into node-vault
   vault.login(authResult.auth.client_token)
@@ -88,4 +96,4 @@ const awsEc2IamLogin = async (vault, options = {}) => {
 }
 
 // creates a logged in instance of node-vault
-module.exports = awsEc2IamLogin
+module.exports = awsIamLogin
