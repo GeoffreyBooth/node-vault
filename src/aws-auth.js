@@ -1,3 +1,5 @@
+const debug = require('debug')('node-vault')
+
 const request = require('request-promise-native')
 // https://docs.aws.amazon.com/general/latest/gr/sigv4_signing.html
 const aws4 = require('aws4')
@@ -10,9 +12,12 @@ const ECS_METADATA_BASE_URL = 'http://169.254.170.2'
 let role
 const getEc2Role = async () => {
   if (role) {
+    debug(`getEc2Role() - using cached role ${role}`)
     return role
   } else {
-    role = await request(`${EC2_METADATA_BASE_URL}meta-data/iam/security-credentials/`)
+    const roleRequestUrl = `${EC2_METADATA_BASE_URL}meta-data/iam/security-credentials/`
+    role = await request(roleRequestUrl)
+    debug(`getEc2Role() - called ${roleRequestUrl} and got role ${role}`)
     return role
   }
 }
@@ -22,14 +27,23 @@ const getEc2Role = async () => {
 const getCredentials = async () => {
   // Elastic Container Service
   if (process.env.AWS_CONTAINER_CREDENTIALS_RELATIVE_URI) {
-    return await request(`${ECS_METADATA_BASE_URL}${process.env.AWS_CONTAINER_CREDENTIALS_RELATIVE_URI}`)
+    const credentialsRequestUrl = `${ECS_METADATA_BASE_URL}${process.env.AWS_CONTAINER_CREDENTIALS_RELATIVE_URI}`
+    debug(`Getting ECS credentials from ${credentialsRequestUrl}`)
+    const credentials = await request(credentialsRequestUrl)
       .then(JSON.parse)
+    debug(`Received credentials for role ${credentials.RoleArn}`)
+    return credentials
 
   // EC2
   } else {
     // get credentials using role
-    return await request(`${EC2_METADATA_BASE_URL}meta-data/iam/security-credentials/${await getEc2Role()}`)
+    const ec2Role = await getEc2Role()
+    const credentialsRequestUrl = `${EC2_METADATA_BASE_URL}meta-data/iam/security-credentials/${ec2Role}`
+    debug(`Getting EC2 credentials from ${credentialsRequestUrl}`)
+    const credentials = await request(credentialsRequestUrl)
       .then(JSON.parse)
+    debug(`Received credentials for role ${credentials.RoleArn}`)
+    return credentials
   }
 }
 
